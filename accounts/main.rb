@@ -12,15 +12,7 @@ class UKAccountsDocument
     @namespaces = {}
     @units = {}
     @contexts = {}
-  end
-
-  def parse
-    case @filename
-    when /\.html$/
-      parse_html
-    when /\.xml$/
-      parse_xml
-    end
+    @parsed = false
   end
 
   def load_namespaces
@@ -40,47 +32,72 @@ class UKAccountsDocument
         @namespaces[:core] = namespace
       when %r{^\'http\://xbrl\.frc\.org\.uk/cd/[^/]+/business\'$}
         @namespaces[:bus] = namespace
+      when %r{^\'http\://www\.companieshouse\.gov\.uk\/ef\/xbrl\/uk\/fr\/gaap\/ae\/[^/]+$}
+        @namespaces[:ae] = namespace
+      when %r{^\'http\://www\.xbrl\.org\/uk\/fr\/gaap\/pt\/[^/]+$}
+        @namespaces[:pt] = namespace
       end
     end
   end
 
   def load_units
-    REXML::XPath.each(@doc, "//#{@namespaces[:xbrli]}:unit") do |unit|
+    prefix =
+      if @namespaces.key?(:xbrli)
+        "#{@namespaces[:xbrli]}:"
+      else
+        ''
+      end
+
+    REXML::XPath.each(@doc, "//#{prefix}unit") do |unit|
       id = unit.attributes['id']
-      measure = REXML::XPath.first(unit, "#{@namespaces[:xbrli]}:measure")
+      measure = REXML::XPath.first(unit, "#{prefix}measure")
       next if measure.nil?
 
       case measure.text
       when /^iso4217\:(.+)$/
         @units[id] = $LAST_MATCH_INFO[1]
-      when "#{@namespaces[:xbrli]}:pure"
+      when "#{prefix}pure"
         @units[id] = ''
       end
     end
   end
 
   def load_contexts
-    REXML::XPath.each(@doc, "//#{@namespaces[:xbrli]}:context") do |context|
+    prefix =
+      if @namespaces.key?(:xbrli)
+        "#{@namespaces[:xbrli]}:"
+      else
+        ''
+      end
+
+    REXML::XPath.each(@doc, "//#{prefix}context") do |context|
       id = context.attributes['id']
       @contexts[id] = {}
-      explicit_member = REXML::XPath.first(context, "#{@namespaces[:xbrli]}:entity/#{@namespaces[:xbrli]}:segment/" \
-        "#{@namespaces[:xbrldi]}:explicitMember")
+      explicit_member = REXML::XPath.first(context, "#{prefix}entity/#{prefix}segment/" \
+        "#{prefix}explicitMember")
       unless explicit_member.nil?
         @contexts[id][:name] = explicit_member.text
         @contexts[id][:dimension] = explicit_member.attributes['dimension']
       end
 
-      period = REXML::XPath.first(context, "#{@namespaces[:xbrli]}:period")
+      period = REXML::XPath.first(context, "#{prefix}period")
       period = parse_period(period)
       @contexts[id][:period] = period
     end
   end
 
   def parse_period(element)
+    prefix =
+      if @namespaces.key?(:xbrli)
+        "#{@namespaces[:xbrli]}:"
+      else
+        ''
+      end
+
     period = {}
-    start_date = REXML::XPath.first(element, "#{@namespaces[:xbrli]}:startDate")
+    start_date = REXML::XPath.first(element, "#{prefix}startDate")
     unless start_date.nil?
-      end_date = REXML::XPath.first(element, "#{@namespaces[:xbrli]}:endDate")
+      end_date = REXML::XPath.first(element, "#{prefix}endDate")
       if end_date.nil?
         warn 'Invalid format: missing an element of endDate'
       else
@@ -90,13 +107,13 @@ class UKAccountsDocument
       return period
     end
 
-    instant = REXML::XPath.first(element, "#{@namespaces[:xbrli]}:instant")
+    instant = REXML::XPath.first(element, "#{prefix}instant")
     unless instant.nil?
       period[:instant] = instant.text
       return period
     end
 
-    forever = REXML::XPath.first(element, "#{@namespaces[:xbrli]}:forever")
+    forever = REXML::XPath.first(element, "#{prefix}forever")
     unless instant.nil?
       period[:forever] = true
       return period
@@ -126,8 +143,10 @@ class UKAccountsDocument
     number
   end
 
-  def get_accounts_from_contexts(account_name)
+  def get_accounts_from_contexts(account_name, account_numeric)
     accounts = []
+    return accounts unless @namespaces.key?(:xbrldi)
+
     # Try to find an element of NameIndividualSegment which refers to the context of a member of the pair.
     REXML::XPath.each(@doc, "//#{@namespaces[:xbrldi]}:explicitMember[contains(text(), '#{account_name}')]/" \
       "parent::#{@namespaces[:xbrli]}:segment/parent::#{@namespaces[:xbrli]}:entity/parent::#{@namespaces[:xbrli]}:context") do |context|
@@ -135,14 +154,18 @@ class UKAccountsDocument
       account = REXML::XPath.first(@doc, "//#{@namespaces[:ix]}:nonFraction[@contextRef='#{context_ref}']")
       next if account.nil?
 
-      unit_ref = account.attributes['unitRef']
-      scale = account.attributes['scale']
-      sign = account.attributes['sign']
-      number = apply_scale_and_sign(account.text, scale, sign)
+      data = if account_numeric
+               unit_ref = account.attributes['unitRef']
+               scale = account.attributes['scale']
+               sign = account.attributes['sign']
+               number = apply_scale_and_sign(account.text, scale, sign)
+             else
+               account.text
+             end
 
       period = @contexts[context_ref][:period]
 
-      accounts.push([number, @units[unit_ref], period])
+      accounts.push([data, @units[unit_ref], period])
     end
     accounts
   end
@@ -177,26 +200,51 @@ class UKAccountsDocument
     nil
   end
 
-  def get_accounts_from_elements(name)
+  def get_accounts_from_elements(account_name, account_numeric)
     accounts = []
-    @doc.each_element("//#{@namespaces[:ix]}:nonFraction[@name='#{name}']") do |account|
+    xpath = case @filename
+            when /\.html$/
+              if @namespaces.key?(:ix)
+                "//#{@namespaces[:ix]}:nonFraction[@name='#{account_name}']"
+              end
+            when /\.xml$/
+              "//#{account_name}"
+            end
+    return accounts if xpath.nil?
+
+    @doc.each_element(xpath) do |account|
       context_ref = account.attributes['contextRef']
       context = @contexts[context_ref]
       if context.nil?
         warn 'Invalid formant: no contextRef attr'
-        return accounts
+        break
       end
 
-      name_individual_segment = get_name_individual_segment(context_ref)
-      unit_ref = account.attributes['unitRef']
-      scale = account.attributes['scale']
-      sign = account.attributes['sign']
-      number = apply_scale_and_sign(account.text, scale, sign)
+      name_individual_segment =
+        (get_name_individual_segment(context_ref) if @filename =~ /\.html$/)
+      data = if account_numeric
+               unit_ref = account.attributes['unitRef']
+               scale = account.attributes['scale']
+               sign = account.attributes['sign']
+               apply_scale_and_sign(account.text, scale, sign)
+             else
+               account.text
+             end
       period = context[:period]
 
-      accounts.push([number, @units[unit_ref], period, name_individual_segment])
+      accounts.push([data, @units[unit_ref], period, name_individual_segment])
     end
     accounts
+  end
+
+  def parse
+    case @filename
+    when /\.html$/
+      parse_html
+    when /\.xml$/
+      parse_xml
+    end
+    @parsed
   end
 
   def parse_html
@@ -217,11 +265,34 @@ class UKAccountsDocument
           company_number.elements.collect(&:text).compact[0]
         end
       end
+    @parsed = true
   end
 
-  def parse_xml; end
+  def parse_xml
+    # open(@filename, 'w') { |out| @doc.write(output: out, indent: 2) }
+    load_namespaces
+    load_contexts
+    load_units
+
+    company_number =
+      REXML::XPath.first(@doc,
+                         "//#{@namespaces[:ae]}:CompaniesHouseRegisteredNumber")
+    @company_number = company_number.text unless company_number.nil?
+    @parsed = true
+  end
 
   def get_accounts
+    return [] unless @parsed
+
+    case @filename
+    when /\.html$/
+      get_accounts_from_html
+    when /\.xml$/
+      get_accounts_from_xml
+    end
+  end
+
+  def get_accounts_from_html
     account_names = ["#{@namespaces[:core]}:TurnoverRevenue",
                      "#{@namespaces[:core]}:WagesSalaries",
                      "#{@namespaces[:core]}:SocialSecurityCosts",
@@ -247,6 +318,32 @@ class UKAccountsDocument
       end
     end
   end
+
+  def get_accounts_from_xml
+    account_infos = []
+
+    # account_names.push("#{@namespaces[:pt]}:GrossDividendPaymentAllShares")
+    # account_names.push("#{@namespaces[:pt]}:CashBankInHand")
+    account_infos.push(["#{@namespaces[:ae]}:AccountsAreInAccordanceWithSpecialProvisionsCompaniesActRelatingToSmallCompanies", false])
+
+    account_infos.each do |account_info|
+      account_name = account_info.shift
+      account_numeric = account_info.shift
+      namespace, account_name2 = *account_name.split(/\:/)
+
+      accounts = []
+      accounts << get_accounts_from_contexts(account_name, account_numeric)
+      accounts << get_accounts_from_elements(account_name, account_numeric)
+      accounts.flatten!(1)
+
+      warn "not small?: #{@company_number}" if accounts.empty?
+      accounts.each do |account|
+        puts [@company_number, account_name2, account[3], account[0], account[1],
+              account[2][:startDate], account[2][:endDate],
+              account[2][:instant], account[2][:forever]].to_csv
+      end
+    end
+  end
 end
 
 class UKAccounts
@@ -260,6 +357,7 @@ class UKAccounts
         unless file_pattern.nil?
           next unless file_pattern.match(entry.name)
         end
+        p entry.name
         data = zipfile.read(entry.name)
         document = UKAccountsDocument.new(data, entry.name)
         document.parse
@@ -275,7 +373,6 @@ class UKAccounts
           next unless zip_pattern.match(zipname)
         end
         read_file(zipname, file_pattern)
-        break
       end
     end
   end
