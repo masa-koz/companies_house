@@ -10,6 +10,29 @@ class UKAccounts
     @target_dir = target_dir
   end
 
+  def self.load_namespaces(doc)
+    namespaces = {}
+    doc.root.attributes.each_value do |val|
+      next unless /^xmlns\:([^=]+)=(.+)$/.match(val.to_string)
+
+      namespace = $LAST_MATCH_INFO[1]
+      url = $LAST_MATCH_INFO[2]
+      case url
+      when %r{^'http\:\/\/www\.xbrl\.org\/[^/]+\/instance\'$}
+        namespaces[:xbrli] = namespace
+      when %r{^'http\:\/\/xbrl\.org\/[^/]+\/xbrldi'$}
+        namespaces[:xbrldi] = namespace
+      when %r{^\'http\://www\.xbrl\.org/[^/]+/inlineXBRL\'$}
+        namespaces[:ix] = namespace
+      when %r{^'http\:\/\/xbrl\.frc\.org\.uk\/fr\/[^/]+\/core\'$}
+        namespaces[:core] = namespace
+      when %r{^\'http\://xbrl\.frc\.org\.uk/cd/[^/]+/business\'$}
+        namespaces[:bus] = namespace
+      end
+    end
+    namespaces
+  end
+
   def self.load_unit(doc, namespaces)
     unit = {}
 
@@ -102,31 +125,37 @@ class UKAccounts
     number
   end
 
-  def self.get_accounts_from_context(doc, namespaces, context, unit, name)
+  def self.get_accounts_from_context(doc, namespaces, unit, account_name)
     accounts = []
-    context.each do |key, val|
-      next unless val[:name] == name
+    # Try to find an element of NameIndividualSegment which refers to the context of a member of the pair.
+    REXML::XPath.each(doc, "//#{namespaces[:xbrldi]}:explicitMember[contains(text(), '#{account_name}')]/" \
+      "parent::#{namespaces[:xbrli]}:segment/parent::#{namespaces[:xbrli]}:entity/parent::#{namespaces[:xbrli]}:context") do |context|
+      context_ref = context.attributes['id']
+      account = REXML::XPath.first(doc, "//#{namespaces[:ix]}:nonFraction[@contextRef='#{context_ref}']")
+      next if account.nil?
 
-      elements = doc.get_elements("//#{namespaces[:ix]}:nonFraction[@contextRef='#{key}']")
-      next if elements.empty?
+      unit_ref = account.attributes['unitRef']
+      scale = account.attributes['scale']
+      sign = account.attributes['sign']
+      number = UKAccounts.apply_scale_and_sign(account.text, scale, sign)
 
-      element = elements.pop
-      unit_ref = element.attributes['unitRef']
-      scale = element.attributes['scale']
-      sign = element.attributes['sign']
-      number = UKAccounts.apply_scale_and_sign(element.text, scale, sign)
-      accounts.push([number, unit[unit_ref], val[:period]])
+      period = REXML::XPath.first(context, "#{namespaces[:xbrli]}:period")
+      period = UKAccounts.parse_period(period, namespaces[:xbrli])
+
+      accounts.push([number, unit[unit_ref], period])
     end
     accounts
   end
 
-  def self.get_name_individual_segment(doc, namespaces, _context, context_ref, _dimension)
+  def self.get_name_individual_segment(doc, namespaces, context_ref)
+    # Try to find an element of NameIndividualSegment which refers to context_ref.
     name_individual_segment =
-      REXML::XPath.first(doc.root, "//#{namespaces[:ix]}:nonNumeric" \
+      REXML::XPath.first(doc, "//#{namespaces[:ix]}:nonNumeric" \
         "[@name='#{namespaces[:core]}:NameIndividualSegment'" \
         " and @contextRef='#{context_ref}']")
     return name_individual_segment.text unless name_individual_segment.nil?
 
+    # Retrieve an element of explicitMember for finding the pair.
     context = REXML::XPath.first(doc.root, "//#{namespaces[:xbrli]}:context[@id='#{context_ref}']")
     return nil if context.nil?
 
@@ -134,6 +163,7 @@ class UKAccounts
       "#{namespaces[:xbrldi]}:explicitMember")
     return nil if explicit_member.nil?
 
+    # Try to find an element of NameIndividualSegment which refers to the context of a member of the pair.
     REXML::XPath.each(doc, "//#{namespaces[:xbrldi]}:explicitMember[contains(text(), '#{explicit_member.text}')]/" \
       "parent::#{namespaces[:xbrli]}:segment/parent::#{namespaces[:xbrli]}:entity/parent::#{namespaces[:xbrli]}:context" \
       "[not(@id='context_ref')]") do |element|
@@ -157,7 +187,7 @@ class UKAccounts
         return accounts
       end
 
-      name_individual_segment = UKAccounts.get_name_individual_segment(doc, namespaces, context, context_ref, val[:dimension])
+      name_individual_segment = UKAccounts.get_name_individual_segment(doc, namespaces, context_ref)
       unit_ref = element.attributes['unitRef']
       scale = element.attributes['scale']
       sign = element.attributes['sign']
@@ -171,28 +201,7 @@ class UKAccounts
   def parse_html(data)
     doc = REXML::Document.new(data)
 
-    namespaces = {}
-    doc.root.attributes.each_value do |val|
-      next unless /^xmlns\:([^=]+)=(.+)$/.match(val.to_string)
-
-      namespace = $LAST_MATCH_INFO[1]
-      url = $LAST_MATCH_INFO[2]
-      case url
-      when %r{^'http\:\/\/www\.xbrl\.org\/[^/]+\/instance\'$}
-        namespaces[:xbrli] = namespace
-      when %r{^'http\:\/\/xbrl\.org\/[^/]+\/xbrldi'$}
-        namespaces[:xbrldi] = namespace
-      when %r{^\'http\://www\.xbrl\.org/[^/]+/inlineXBRL\'$}
-        namespaces[:ix] = namespace
-      when %r{^'http\:\/\/xbrl\.frc\.org\.uk\/fr\/[^/]+\/core\'$}
-        namespaces[:core] = namespace
-      when %r{^\'http\://xbrl\.frc\.org\.uk/cd/[^/]+/business\'$}
-        namespaces[:bus] = namespace
-      end
-    end
-
-    p namespaces
-
+    namespaces = UKAccounts.load_namespaces(doc)
     unit = UKAccounts.load_unit(doc, namespaces)
     context = UKAccounts.load_context(doc, namespaces)
 
@@ -211,12 +220,16 @@ class UKAccounts
       end
 
     account_names = ["#{namespaces[:core]}:TurnoverRevenue",
+                     "#{namespaces[:core]}:WagesSalaries",
+                     "#{namespaces[:core]}:SocialSecurityCosts",
+                     "#{namespaces[:core]}:PensionOtherPost-employmentBenefitCostsOtherPensionCosts",
                      "#{namespaces[:core]}:RetainedEarningsAccumulatedLosses",
-                     "#{namespaces[:core]}:FixedAssets"]
+                     "#{namespaces[:core]}:FixedAssets",
+                     "#{namespaces[:core]}:DividendsPaid"]
 
     account_names.each do |account_name|
       _namespace, account_name2 = *account_name.split(/\:/)
-      accounts = UKAccounts.get_accounts_from_context(doc, namespaces, context, unit, account_name)
+      accounts = UKAccounts.get_accounts_from_context(doc, namespaces, unit, account_name)
       accounts.each do |account|
         puts [company_number, account_name2, account[3], account[0], account[1],
               account[2][:startDate], account[2][:endDate],
@@ -241,7 +254,6 @@ class UKAccounts
           next unless file_pattern.match(entry.name)
         end
         data = zipfile.read(entry.name)
-        open(entry.name, 'w') { |f| f.print data }
         case entry.name
         when /\.html$/
           warn entry.name.to_s
