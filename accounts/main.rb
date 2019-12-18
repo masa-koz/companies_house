@@ -6,20 +6,14 @@ require 'rexml/xpath'
 require 'csv'
 
 class UKAccountsDocument
-  def initialize(data, filename)
+  def initialize(data, filename, debug)
     @doc = REXML::Document.new(data)
     @filename = filename
-    @namespace = {
-      'bus' => 'http://xbrl.frc.org.uk/cd/2014-09-01/business',
-      'core' => 'http://xbrl.frc.org.uk/fr/2014-09-01/core',
-      'ix' => 'http://www.xbrl.org/2008/inlineXBRL',
-      'xbrli' => 'http://www.xbrl.org/2003/instance',
-      'xbrldi' => 'http://xbrl.org/2006/xbrldi'
-    }
     @ns = {}
     @units = {}
     @contexts = {}
     @parsed = false
+    @debug = debug
   end
 
   def load_namespace
@@ -88,7 +82,7 @@ class UKAccountsDocument
       explicit_member = REXML::XPath.first(context, "#{prefix}entity/#{prefix}segment/" \
         "#{prefix}explicitMember")
       unless explicit_member.nil?
-        @contexts[id][:name] = explicit_member.text
+        @contexts[id][:name] = explicit_member.text.gsub(/\s/, '')
         @contexts[id][:dimension] = explicit_member.attributes['dimension']
       end
 
@@ -194,7 +188,9 @@ class UKAccountsDocument
       REXML::XPath.first(@doc, "//#{@ns[:ix]}:nonNumeric" \
         "[contains(@name,'NameIndividualSegment')" \
         " and @contextRef='#{context_ref}']")
-    return name_individual_segment.text unless name_individual_segment.nil?
+    unless name_individual_segment.nil?
+      return name_individual_segment.text.gsub(/\s/, '')
+    end
 
     # Retrieve an element of explicitMember for finding the pair.
     context = REXML::XPath.first(@doc, "//#{@ns[:xbrli]}:context[@id='#{context_ref}']")
@@ -204,16 +200,21 @@ class UKAccountsDocument
       "#{@ns[:xbrldi]}:explicitMember")
     return nil if explicit_member.nil?
 
+    # remove non-letter such as newline.
+    explicit_member = explicit_member.text.gsub(/\s/, '')
     # Try to find an element of NameIndividualSegment which refers to the context of a member of the pair.
-    REXML::XPath.each(@doc, "//#{@ns[:xbrldi]}:explicitMember[contains(text(), '#{explicit_member.text}')]/" \
-      "parent::#{@ns[:xbrli]}:segment/parent::#{@ns[:xbrli]}:entity/parent::#{@ns[:xbrli]}:context" \
-      "[not(@id='context_ref')]") do |element|
+    xpath = "//#{@ns[:xbrldi]}:explicitMember[contains(text(),\'#{explicit_member}')]/" \
+    "parent::#{@ns[:xbrli]}:segment/parent::#{@ns[:xbrli]}:entity/parent::#{@ns[:xbrli]}:context" \
+    "[not(@id='context_ref')]"
+    REXML::XPath.each(@doc, xpath) do |element|
       context_ref1 = element.attributes['id']
       name_individual_segment =
         REXML::XPath.first(@doc, "//#{@ns[:ix]}:nonNumeric" \
           "[contains(@name,'NameIndividualSegment')" \
           " and @contextRef='#{context_ref1}']")
-      return name_individual_segment.text unless name_individual_segment.nil?
+      unless name_individual_segment.nil?
+        return name_individual_segment.text.gsub(/\s/, '')
+      end
     end
     nil
   end
@@ -244,9 +245,9 @@ class UKAccountsDocument
                unit_ref = account.attributes['unitRef']
                scale = account.attributes['scale']
                sign = account.attributes['sign']
-               apply_scale_and_sign(account.text, scale, sign)
+               apply_scale_and_sign(account.text.gsub(/\s/, ''), scale, sign)
              else
-               account.text
+               account.text.gsub(/\s/, '')
              end
       period = context[:period]
 
@@ -256,11 +257,17 @@ class UKAccountsDocument
   end
 
   def parse
-    case @filename
-    when /\.html$/
-      parse_html
-    when /\.xml$/
-      parse_xml
+    begin
+      case @filename
+      when /\.html$/
+        parse_html
+      when /\.xml$/
+        parse_xml
+      end
+    rescue StandardError
+      warn $ERROR_INFO.full_message
+      open(@filename, 'w') { |out| @doc.write(output: out, indent: 2) }
+      exit if @debug
     end
     @parsed
   end
@@ -278,7 +285,7 @@ class UKAccountsDocument
     @company_number =
       unless company_number.nil?
         if company_number.has_text?
-          company_number.text
+          company_number.text.gsub(/\s/, '')
         else
           # text may be located under ix's child elements
           company_number.elements.collect(&:text).compact[0]
@@ -298,7 +305,9 @@ class UKAccountsDocument
     company_number =
       REXML::XPath.first(@doc,
                          "//#{@ns[:ae]}:CompaniesHouseRegisteredNumber")
-    @company_number = company_number.text unless company_number.nil?
+    unless company_number.nil?
+      @company_number = company_number.text.gsub(/\s/, '')
+    end
     @parsed = true
   end
 
@@ -313,7 +322,9 @@ class UKAccountsDocument
         get_accounts_from_xml(output)
       end
     rescue StandardError
+      warn $ERROR_INFO.full_message
       open(@filename, 'w') { |out| @doc.write(output: out, indent: 2) }
+      exit if @debug
     end
   end
 
@@ -371,9 +382,10 @@ class UKAccountsDocument
 end
 
 class UKAccounts
-  def initialize(target_dir)
+  def initialize(target_dir, debug)
     @target_dir = target_dir
     @output = open('accounts.csv', 'w')
+    @debug = debug
   end
 
   def read_file(zipname, file_pattern)
@@ -386,7 +398,7 @@ class UKAccounts
           next unless file_pattern.match(entry.name)
         end
         data = zipfile.read(entry.name)
-        document = UKAccountsDocument.new(data, entry.name)
+        document = UKAccountsDocument.new(data, entry.name, @debug)
         document.parse
         document.get_accounts(@output)
       end
@@ -413,5 +425,5 @@ zip_pattern = ARGV.shift
 file_pattern = Regexp.compile(file_pattern) unless file_pattern.nil?
 zip_pattern = Regexp.compile(zip_pattern) unless zip_pattern.nil?
 
-accounts = UKAccounts.new(dirname)
+accounts = UKAccounts.new(dirname, true)
 accounts.read_dir(file_pattern, zip_pattern)
