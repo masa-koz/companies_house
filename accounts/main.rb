@@ -1,18 +1,20 @@
 # frozen_string_literal: true
 
+require 'csv'
 require 'zip/zip'
 require 'rexml/document'
 require 'rexml/xpath'
-require 'csv'
+require 'parallel'
 
 class UKAccountsDocument
-  def initialize(data, filename, debug)
+  def initialize(data, filename, id, debug)
     @doc = REXML::Document.new(data)
     @filename = filename
     @ns = {}
     @units = {}
     @contexts = {}
     @parsed = false
+    @id = id
     @debug = debug
   end
 
@@ -105,7 +107,7 @@ class UKAccountsDocument
     unless start_date.nil?
       end_date = REXML::XPath.first(element, "#{prefix}endDate")
       if end_date.nil?
-        warn 'Invalid format: missing an element of endDate'
+        warn "[Worker#{@id.nil? ? 0 : @id}]Invalid format: missing an element of endDate"
       else
         period[:startDate] = start_date.text
         period[:endDate] = end_date.text
@@ -141,14 +143,14 @@ class UKAccountsDocument
       if /^(\d)+$/.match(scale)
         number *= (10**Integer($LAST_MATCH_INFO[1]))
       else
-        warn "Invalid format: scale='#{scale}''"
+        warn "[Worker#{@id.nil? ? 0 : @id}]Invalid format: scale='#{scale}''"
       end
     end
     unless sign.nil?
       if /^(?:\-)?$/.match(sign)
         number = -number if sign == '-'
       else
-        warn "Invalid format: sign='#{sign}''"
+        warn "[Worker#{@id.nil? ? 0 : @id}]Invalid format: sign='#{sign}''"
       end
     end
     number
@@ -235,7 +237,7 @@ class UKAccountsDocument
       context_ref = account.attributes['contextRef']
       context = @contexts[context_ref]
       if context.nil?
-        warn 'Invalid formant: no contextRef attr'
+        warn "[Worker#{@id.nil? ? 0 : @id}]Invalid formant: no contextRef attr"
         break
       end
 
@@ -265,7 +267,7 @@ class UKAccountsDocument
         parse_xml
       end
     rescue StandardError
-      warn $ERROR_INFO.full_message
+      warn "[Worker#{@id.nil? ? 0 : @id}]#{$ERROR_INFO.full_message}"
       open(@filename, 'w') { |out| @doc.write(output: out, indent: 2) }
       exit if @debug
     end
@@ -291,7 +293,7 @@ class UKAccountsDocument
           company_number.elements.collect(&:text).compact[0]
         end
       end
-    warn "UKCompaniesHouseRegisteredNumber: #{@company_number}"
+    warn "[Worker#{@number.nil? ? 0 : @number}]UKCompaniesHouseRegisteredNumber: #{@company_number}"
 
     @parsed = true
   end
@@ -322,7 +324,7 @@ class UKAccountsDocument
         get_accounts_from_xml(output)
       end
     rescue StandardError
-      warn $ERROR_INFO.full_message
+      warn "[Worker#{@id.nil? ? 0 : @id}]#{$ERROR_INFO.full_message}"
       open(@filename, 'w') { |out| @doc.write(output: out, indent: 2) }
       exit if @debug
     end
@@ -340,7 +342,7 @@ class UKAccountsDocument
     account_infos.each do |account_info|
       account_name = account_info.shift
       account_numeric = account_info.shift
-      namespace, account_name2 = *account_name.split(/\:/)
+      _prefix, account_name2 = *account_name.split(/\:/)
       accounts = []
       accounts << get_accounts_from_contexts(account_name, account_numeric)
       accounts << get_accounts_from_elements(account_name, account_numeric)
@@ -351,9 +353,6 @@ class UKAccountsDocument
                      account[2][:startDate], account[2][:endDate],
                      account[2][:instant], account[2][:forever]].to_csv
         output.flush
-        warn [@company_number, account_name2, account[3], account[0], account[1],
-              account[2][:startDate], account[2][:endDate],
-              account[2][:instant], account[2][:forever]].to_csv
       end
     end
   end
@@ -382,23 +381,34 @@ class UKAccountsDocument
 end
 
 class UKAccounts
-  def initialize(target_dir, debug)
+  def initialize(target_dir, id, debug)
     @target_dir = target_dir
-    @output = open('accounts.csv', 'w')
+    @id = id
+    @target_subdir = unless id.nil?
+      "#{id}"
+    else
+      "."
+    end
+    csvfilename = if id.nil?
+      'accounts.csv'
+    else
+      "accounts_#{id}.csv"
+    end
+    @output = open(csvfilename, 'w')
     @debug = debug
   end
 
   def read_file(zipname, file_pattern)
-    warn "Zipfile: #{zipname}"
+    warn "[Worker#{@number.nil? ? 0 : @id}]Zipfile: #{zipname}"
     Zip::ZipFile.open(zipname) do |zipfile|
       number = zipfile.entries.size
       zipfile.each_with_index do |entry, i|
-        warn "(#{i + 1}/#{number}): #{entry.name}"
+        warn "[Worker#{@id.nil? ? 0 : @id}](#{i + 1}/#{number}): #{entry.name}"
         unless file_pattern.nil?
           next unless file_pattern.match(entry.name)
         end
         data = zipfile.read(entry.name)
-        document = UKAccountsDocument.new(data, entry.name, @debug)
+        document = UKAccountsDocument.new(data, entry.name, @number, @debug)
         document.parse
         document.get_accounts(@output)
       end
@@ -407,11 +417,13 @@ class UKAccounts
 
   def read_dir(file_pattern, zip_pattern)
     Dir.chdir(@target_dir) do
-      Dir.glob('*.zip') do |zipname|
-        unless zip_pattern.nil?
-          next unless zip_pattern.match(zipname)
+      Dir.chdir(@target_subdir) do
+        Dir.glob('*.zip') do |zipname|
+          unless zip_pattern.nil?
+            next unless zip_pattern.match(zipname)
+          end
+          read_file(zipname, file_pattern)
         end
-        read_file(zipname, file_pattern)
       end
     end
   end
@@ -425,5 +437,7 @@ zip_pattern = ARGV.shift
 file_pattern = Regexp.compile(file_pattern) unless file_pattern.nil?
 zip_pattern = Regexp.compile(zip_pattern) unless zip_pattern.nil?
 
-accounts = UKAccounts.new(dirname, true)
-accounts.read_dir(file_pattern, zip_pattern)
+Parallel.each((1..12).to_a) do |i|
+  accounts = UKAccounts.new(dirname, i, false)
+  accounts.read_dir(file_pattern, zip_pattern)
+end
