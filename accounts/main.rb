@@ -179,7 +179,7 @@ class UKAccountsDocument
 
       period = @contexts[context_ref][:period]
 
-      accounts.push([data, @units[unit_ref], period])
+      accounts.push([data, @units[unit_ref], period, nil, context_ref])
     end
     accounts
   end
@@ -253,7 +253,7 @@ class UKAccountsDocument
              end
       period = context[:period]
 
-      accounts.push([data, @units[unit_ref], period, name_individual_segment])
+      accounts.push([data, @units[unit_ref], period, name_individual_segment, context_ref])
     end
     accounts
   end
@@ -331,13 +331,36 @@ class UKAccountsDocument
   end
 
   def get_accounts_from_html(output)
-    account_infos = [["#{@ns[:core]}:TurnoverRevenue", true],
+    account_infos = [
+                     ["#{@ns[:core]}:TurnoverRevenue", true],
+                     ["#{@ns[:core]}:CostSales", true],
+                     ["#{@ns[:core]}:GrossProfitLoss", true],
+                     ["#{@ns[:core]}:OperatingProfitLoss", true],
+                     ["#{@ns[:core]}:ProfitLossOnOrdinaryActivitiesBeforeTax", true],
+                     ["#{@ns[:core]}:OtherComprehensiveIncomeExpenseBeforeTax", true],
+                     ["#{@ns[:core]}:TaxTaxCreditOnProfitOrLossOnOrdinaryActivities", true],
+                     ["#{@ns[:core]}:IncomeTaxExpenseCreditOnComponentsOtherComprehensiveIncome", true],
+                     ["#{@ns[:core]}:ProfitLossOnOrdinaryActivitiesAfterTax", true],
+                     ["#{@ns[:core]}:OtherComprehensiveIncomeExpenseNetTax", true],
+                     ["#{@ns[:core]}:ExtraordinaryProfitLossAfterTax", true],
+                     ["#{@ns[:core]}:ProfitLoss", true],
+                     ["#{@ns[:core]}:ComprehensiveIncomeExpense", true],
+                     
+                     ["#{@ns[:core]}:FixedAssets", true],
+                     ["#{@ns[:core]}:IntangibleAssets", true],
+                     ["#{@ns[:core]}:PropertyPlantEquipment", true],
+                     ["#{@ns[:core]}:InvestmentsFixedAssets", true],
+                     ["#{@ns[:core]}:CurrentAssets", true],
+                     ["#{@ns[:core]}:TotalAssets", true],
+                     ["#{@ns[:core]}:Creditors", true],
+                     ["#{@ns[:core]}:NetAssetsLiabilities", true],
+                     ["#{@ns[:core]}:Equity", true],
+                     ["#{@ns[:core]}:RetainedEarningsAccumulatedLosses", true],
+                     ["#{@ns[:core]}:TotalLiabilities", true],
+
                      ["#{@ns[:core]}:WagesSalaries", true],
                      ["#{@ns[:core]}:DividendsPaid", true],
-                     ["#{@ns[:core]}:FixedAssets", true],
-                     ["#{@ns[:core]}:CurrentAssets", true],
-                     ["#{@ns[:core]}:CashBankOnHand", true],
-                     ["#{@ns[:core]}:RetainedEarningsAccumulatedLosses", true]]
+                    ]
 
     account_infos.each do |account_info|
       account_name = account_info.shift
@@ -349,7 +372,7 @@ class UKAccountsDocument
       accounts.flatten!(1)
 
       accounts.each do |account|
-        output.puts [@company_number, account_name2, account[3], account[0], account[1],
+        output.puts [@company_number, account_name2, account[3], account[4], account[0], account[1],
                      account[2][:startDate], account[2][:endDate],
                      account[2][:instant], account[2][:forever]].to_csv
         output.flush
