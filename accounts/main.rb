@@ -5,16 +5,17 @@ require 'zip/zip'
 require 'rexml/document'
 require 'rexml/xpath'
 require 'parallel'
+require 'pstore'
 
 class UKAccountsDocument
-  def initialize(data, filename, id, debug)
+  def initialize(data, filename, worker_id, debug)
     @doc = REXML::Document.new(data)
     @filename = filename
     @ns = {}
     @units = {}
     @contexts = {}
     @parsed = false
-    @id = id
+    @worker_id = worker_id
     @debug = debug
   end
 
@@ -107,7 +108,7 @@ class UKAccountsDocument
     unless start_date.nil?
       end_date = REXML::XPath.first(element, "#{prefix}endDate")
       if end_date.nil?
-        warn "[Worker#{@id.nil? ? 0 : @id}]Invalid format: missing an element of endDate"
+        warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}]Invalid format: missing an element of endDate"
       else
         period[:startDate] = start_date.text
         period[:endDate] = end_date.text
@@ -143,14 +144,14 @@ class UKAccountsDocument
       if /^(\d)+$/.match(scale)
         number *= (10**Integer($LAST_MATCH_INFO[1]))
       else
-        warn "[Worker#{@id.nil? ? 0 : @id}]Invalid format: scale='#{scale}''"
+        warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}]Invalid format: scale='#{scale}''"
       end
     end
     unless sign.nil?
       if /^(?:\-)?$/.match(sign)
         number = -number if sign == '-'
       else
-        warn "[Worker#{@id.nil? ? 0 : @id}]Invalid format: sign='#{sign}''"
+        warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}]Invalid format: sign='#{sign}''"
       end
     end
     number
@@ -237,7 +238,7 @@ class UKAccountsDocument
       context_ref = account.attributes['contextRef']
       context = @contexts[context_ref]
       if context.nil?
-        warn "[Worker#{@id.nil? ? 0 : @id}]Invalid formant: no contextRef attr"
+        warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}]Invalid formant: no contextRef attr"
         break
       end
 
@@ -267,7 +268,7 @@ class UKAccountsDocument
         parse_xml
       end
     rescue StandardError
-      warn "[Worker#{@id.nil? ? 0 : @id}]#{$ERROR_INFO.full_message}"
+      warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}]#{$ERROR_INFO.full_message}"
       open(@filename, 'w') { |out| @doc.write(output: out, indent: 2) }
       exit if @debug
     end
@@ -293,7 +294,7 @@ class UKAccountsDocument
           company_number.elements.collect(&:text).compact[0]
         end
       end
-    warn "[Worker#{@number.nil? ? 0 : @number}]UKCompaniesHouseRegisteredNumber: #{@company_number}"
+    warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}]UKCompaniesHouseRegisteredNumber: #{@company_number}"
 
     @parsed = true
   end
@@ -324,7 +325,7 @@ class UKAccountsDocument
         get_accounts_from_xml(output)
       end
     rescue StandardError
-      warn "[Worker#{@id.nil? ? 0 : @id}]#{$ERROR_INFO.full_message}"
+      warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}]#{$ERROR_INFO.full_message}"
       open(@filename, 'w') { |out| @doc.write(output: out, indent: 2) }
       exit if @debug
     end
@@ -347,16 +348,16 @@ class UKAccountsDocument
                      ["#{@ns[:core]}:ComprehensiveIncomeExpense", true],
                      
                      ["#{@ns[:core]}:FixedAssets", true],
-                     ["#{@ns[:core]}:IntangibleAssets", true],
-                     ["#{@ns[:core]}:PropertyPlantEquipment", true],
-                     ["#{@ns[:core]}:InvestmentsFixedAssets", true],
+                     #["#{@ns[:core]}:IntangibleAssets", true],
+                     #["#{@ns[:core]}:PropertyPlantEquipment", true],
+                     #["#{@ns[:core]}:InvestmentsFixedAssets", true],
                      ["#{@ns[:core]}:CurrentAssets", true],
-                     ["#{@ns[:core]}:TotalAssets", true],
-                     ["#{@ns[:core]}:Creditors", true],
+                     #["#{@ns[:core]}:TotalAssets", true],
+                     #["#{@ns[:core]}:Creditors", true],
                      ["#{@ns[:core]}:NetAssetsLiabilities", true],
-                     ["#{@ns[:core]}:Equity", true],
+                     #["#{@ns[:core]}:Equity", true],
                      ["#{@ns[:core]}:RetainedEarningsAccumulatedLosses", true],
-                     ["#{@ns[:core]}:TotalLiabilities", true],
+                     #["#{@ns[:core]}:TotalLiabilities", true],
 
                      ["#{@ns[:core]}:WagesSalaries", true],
                      ["#{@ns[:core]}:DividendsPaid", true],
@@ -404,29 +405,37 @@ class UKAccountsDocument
 end
 
 class UKAccounts
-  def initialize(target_dir, id, debug)
+  def initialize(target_dir, worker_id, debug)
     @target_dir = target_dir
-    @id = id
-    @target_subdir = unless id.nil?
-      "#{id}"
+    @worker_id = worker_id
+    @target_subdir = unless worker_id.nil?
+      "#{worker_id}"
     else
       "."
     end
-    csvfilename = if id.nil?
-      'accounts.csv'
+    csvfilename = if worker_id.nil?
+      "accounts_#{Time::now.tv_sec}.csv"
     else
-      "accounts_#{id}.csv"
+      "accounts_#{worker_id}_#{Time::now.tv_sec}.csv"
     end
     @output = open(csvfilename, 'w')
     @debug = debug
   end
 
   def read_file(zipname, file_pattern)
-    warn "[Worker#{@number.nil? ? 0 : @id}]Zipfile: #{zipname}"
+    db = PStore.new("#{zipname}.db")
+    processed = db.transaction { db['processed'] }
+    processed = 0 if processed.nil?
+    warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}]zipfile: #{zipname}, processed: #{processed}"
     Zip::ZipFile.open(zipname) do |zipfile|
       number = zipfile.entries.size
       zipfile.each_with_index do |entry, i|
-        warn "[Worker#{@id.nil? ? 0 : @id}](#{i + 1}/#{number}): #{entry.name}"
+        if i < processed
+          warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}][skipped](#{i + 1}/#{number}): #{entry.name}"
+          next
+        else
+          warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}](#{i + 1}/#{number}): #{entry.name}"
+        end
         unless file_pattern.nil?
           next unless file_pattern.match(entry.name)
         end
@@ -434,6 +443,8 @@ class UKAccounts
         document = UKAccountsDocument.new(data, entry.name, @number, @debug)
         document.parse
         document.get_accounts(@output)
+        db.transaction { db['processed'] = i}
+        STDERR.flush
       end
     end
   end
