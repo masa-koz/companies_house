@@ -20,7 +20,7 @@ class UKAccountsDocument
 
     if /\_(\d{8})\_(\d{8})\.html$/.match(filename)
       @registered_number = $LAST_MATCH_INFO[1]
-      @filing_data = $LAST_MATCH_INFO[2]
+      @filing_date = $LAST_MATCH_INFO[2]
     end
   end
 
@@ -51,6 +51,32 @@ class UKAccountsDocument
       when %r{^http\://www\.xbrl\.org/uk/fr/gaap/pt/[^/]+$}
         @ns[:pt] = local
       end
+    end
+  end
+
+  def convert_units
+    prefix =
+      if @ns.key?(:xbrli)
+        "#{@ns[:xbrli]}:"
+      else
+        ''
+      end
+
+    REXML::XPath.each(@doc, "//#{prefix}unit") do |unit|
+      unit_hash = {}
+      id = unit.attributes['id']
+      unit_hash[:id] = id
+
+      measure = REXML::XPath.first(unit, "#{prefix}measure")
+      unless measure.nil?
+        text = measure.get_text
+        text = text.value.gsub(/\s/, '') unless text.nil?
+        unit_hash[:measure] = text
+      end
+
+      json = { registered_number: @registered_number, filing_date: @filing_date, unit: unit_hash }
+      @output.puts json.to_json
+      @output.flush
     end
   end
 
@@ -106,7 +132,7 @@ class UKAccountsDocument
       forever = REXML::XPath.first(context, "#{prefix}period/#{prefix}forever")
       context_hash[:forever] = '' unless forever.nil?
 
-      json = { registered_number: @registered_number, filing_data: @filing_data, context: context_hash }
+      json = { registered_number: @registered_number, filing_date: @filing_date, context: context_hash }
       @output.puts json.to_json
       @output.flush
     end
@@ -129,7 +155,7 @@ class UKAccountsDocument
       text = text.value.gsub(/\s/, '') unless text.nil?
       non_numeric_hash[:text] = text
 
-      json = { registered_number: @registered_number, filing_data: @filing_data, nonNumeric: non_numeric_hash }
+      json = { registered_number: @registered_number, filing_date: @filing_date, nonNumeric: non_numeric_hash }
       @output.puts json.to_json
       @output.flush
     end
@@ -143,11 +169,12 @@ class UKAccountsDocument
       non_fraction_hash[:decimals] = non_fraction.attributes['decimals']
       non_fraction_hash[:format] = non_fraction.attributes['format']
       non_fraction_hash[:scale] = non_fraction.attributes['scale']
+      non_fraction_hash[:sign] = non_fraction.attributes['sign']
       text = non_fraction.get_text
       text = text.value.gsub(/\s/, '') unless text.nil?
       non_fraction_hash[:text] = text
 
-      json = { registered_number: @registered_number, filing_data: @filing_data, nonFraction: non_fraction_hash }
+      json = { registered_number: @registered_number, filing_date: @filing_date, nonFraction: non_fraction_hash }
       @output.puts json.to_json
       @output.flush
     end
@@ -178,6 +205,7 @@ class UKAccountsDocument
 
     load_namespace
 
+    convert_units
     convert_contexts
     convert_ixs
 
