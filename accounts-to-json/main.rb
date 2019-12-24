@@ -245,14 +245,15 @@ class UKAccounts
     processed = db.transaction { db['processed'] }
     processed = 0 if processed.nil?
     warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}]zipfile: #{zipname}, processed: #{processed}"
+    begin
     Zip::ZipFile.open(zipname) do |zipfile|
       number = zipfile.entries.size
       zipfile.each_with_index do |entry, i|
-        if i < processed
+        if i > processed
+          warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}](#{i + 1}/#{number}): #{entry.name}"
+        else
           warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}][skipped](#{i + 1}/#{number}): #{entry.name}"
           next
-        else
-          warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}](#{i + 1}/#{number}): #{entry.name}"
         end
         unless file_pattern.nil?
           next unless file_pattern.match(entry.name)
@@ -263,6 +264,9 @@ class UKAccounts
         db.transaction { db['processed'] = i }
         STDERR.flush
       end
+    end
+    rescue StandardError
+      warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}]: In processing #{zipname}: #{$ERROR_INFO.full_message}"
     end
   end
 
