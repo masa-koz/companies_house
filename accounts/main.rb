@@ -440,7 +440,7 @@ class UKAccounts
           next unless file_pattern.match(entry.name)
         end
         data = zipfile.read(entry.name)
-        document = UKAccountsDocument.new(data, entry.name, @number, @debug)
+        document = UKAccountsDocument.new(data, entry.name, @worker_id, @debug)
         document.parse
         document.get_accounts(@output)
         db.transaction { db['processed'] = i}
