@@ -1,12 +1,12 @@
 # frozen_string_literal: true
 
-require 'csv'
 require 'json'
 require 'zip/zip'
 require 'rexml/document'
 require 'rexml/xpath'
 require 'parallel'
 require 'pstore'
+require 'optparse'
 
 class UKAccountsDocument
   def initialize(data, filename, output, worker_id, debug)
@@ -18,9 +18,9 @@ class UKAccountsDocument
     @worker_id = worker_id
     @debug = debug
 
-    if /\_(\d{8})\_(\d{8})\.html$/.match(filename)
-      @registered_number = $LAST_MATCH_INFO[1]
-      @filing_date = $LAST_MATCH_INFO[2]
+    if m = /\_(\d{8})\_(\d{8})\.html$/.match(filename)
+      @registered_number = m[1]
+      @filing_date = m[2]
     end
   end
 
@@ -30,10 +30,17 @@ class UKAccountsDocument
                    REXML::XPath.first(@doc, '/html').namespaces
                  when /\.xml$/
                    REXML::XPath.first(@doc, '/*:xbrl').namespaces
-                 else
-                   return
     end
+    get_ns_local(namespaces)
 
+    if @filename =~ /\.html$/
+      ix = REXML::XPath.first(@doc, "//#{@ns[:ix]}:header")
+      get_ns_local(ix.namespaces) unless ix.nil?
+
+    end
+  end
+
+  def get_ns_local(namespaces)
     namespaces.each do |local, namespace|
       case namespace
       when %r{^http\://www\.xbrl\.org/[^/]+/instance$}
@@ -192,8 +199,10 @@ class UKAccountsDocument
       when /\.xml$/
         parse_xml
       end
-    rescue StandardError
-      warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}]#{$ERROR_INFO.full_message}"
+    rescue StandardError => e
+      warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}]#{unless e.nil?
+                                                           e.full_message
+                                                         end}"
       open(@filename, 'w') { |out| @doc.write(output: out, indent: 2) }
       exit if @debug
     end
@@ -231,43 +240,46 @@ class UKAccounts
                      else
                        worker_id.to_s
                      end
-    csvfilename = if worker_id.nil?
-                    "accounts_#{Time.now.tv_sec}.json"
-                  else
-                    "accounts_#{worker_id}_#{Time.now.tv_sec}.json"
-    end
-    @output = open(csvfilename, 'w')
     @debug = debug
   end
 
   def read_file(zipname, file_pattern)
+    jsonname = if @worker_id.nil?
+                 "#{zipname}_#{Time.now.tv_sec}.json"
+               else
+                 "#{zipname}_#{@worker_id}_#{Time.now.tv_sec}.json"
+                  end
+    output = open(jsonname, 'w')
     db = PStore.new("#{zipname}.db")
     processed = db.transaction { db['processed'] }
     processed = 0 if processed.nil?
     warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}]zipfile: #{zipname}, processed: #{processed}"
     begin
-    Zip::ZipFile.open(zipname) do |zipfile|
-      number = zipfile.entries.size
-      zipfile.each_with_index do |entry, i|
-        if i > processed
-          warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}](#{i + 1}/#{number}): #{entry.name}"
-        else
-          warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}][skipped](#{i + 1}/#{number}): #{entry.name}"
-          next
+      Zip::ZipFile.open(zipname) do |zipfile|
+        number = zipfile.entries.size
+        zipfile.each_with_index do |entry, i|
+          if i > processed
+            warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}](#{i + 1}/#{number}): #{entry.name}"
+          else
+            warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}][skipped](#{i + 1}/#{number}): #{entry.name}"
+            next
+          end
+          unless file_pattern.nil?
+            next unless file_pattern.match(entry.name)
+          end
+          data = zipfile.read(entry.name)
+          document = UKAccountsDocument.new(data, entry.name, output, @worker_id, @debug)
+          document.parse
+          db.transaction { db['processed'] = i }
+          STDERR.flush
         end
-        unless file_pattern.nil?
-          next unless file_pattern.match(entry.name)
-        end
-        data = zipfile.read(entry.name)
-        document = UKAccountsDocument.new(data, entry.name, @output, @worker_id, @debug)
-        document.parse
-        db.transaction { db['processed'] = i }
-        STDERR.flush
       end
+    rescue StandardError => e
+      warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}]: In processing #{zipname}: #{unless e.nil?
+                                                                                       e.full_message
+                                                                                     end}"
     end
-    rescue StandardError
-      warn "[Worker#{@worker_id.nil? ? 0 : @worker_id}]: In processing #{zipname}: #{$ERROR_INFO.full_message}"
-    end
+    output.close
   end
 
   def read_dir(file_pattern, zip_pattern)
@@ -284,6 +296,17 @@ class UKAccounts
   end
 end
 
+opt = OptionParser.new
+params = {}
+opt.on('-p [VAL]') { |v| params[:p] = v }
+opt.parse!(ARGV)
+
+parallel = if params.key?(:p)
+             Integer(params[:p])
+           else
+             8
+end
+
 exit(1) if ARGV.empty?
 
 dirname = ARGV.shift
@@ -292,7 +315,7 @@ zip_pattern = ARGV.shift
 file_pattern = Regexp.compile(file_pattern) unless file_pattern.nil?
 zip_pattern = Regexp.compile(zip_pattern) unless zip_pattern.nil?
 
-Parallel.each((1..12).to_a) do |i|
+Parallel.each((1..parallel).to_a) do |i|
   accounts = UKAccounts.new(dirname, i, false)
   accounts.read_dir(file_pattern, zip_pattern)
 end
