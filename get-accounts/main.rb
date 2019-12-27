@@ -2,6 +2,7 @@
 
 require 'csv'
 require 'mongo'
+require 'optparse'
 
 def apply_scale_and_sign(text, scale, sign)
   return nil unless /^[\d,]+$/.match(text)
@@ -24,105 +25,123 @@ def apply_scale_and_sign(text, scale, sign)
   number
 end
 
+def retrieve_entries(collection, pattern, names, duration, ignore_sign)
+  entries = {}
+  query = { 'nonFraction.name': pattern }
+  results = collection.find(query)
+  warn "Number of Dividends: #{results.count}"
+
+  results.each do |result|
+    account_name = if /^[^\:]+\:(.+)$/.match(result.dig('nonFraction', 'name'))
+                     $LAST_MATCH_INFO[1]
+                   else
+                     result.dig('nonFraction', 'name')
+    end
+
+    found = false
+    names.each do |name|
+      if account_name == name
+        found = true
+        break
+      end
+    end
+    next unless found
+
+    registered_number = result.dig('registered_number')
+
+    filing_date = result.dig('filing_date')
+    context_ref = result.dig('nonFraction', 'contextRef')
+    unit_ref = result.dig('nonFraction', 'unitRef')
+
+    # $and: [{ "context.end_date": {$gt:'2017-12-31'} }, { "context.end_date": {$lt:'2019-01-01'} }]
+    query = { 'registered_number': registered_number,
+              'filing_date': filing_date,
+              'context.id': context_ref }
+    unless duration.nil?
+      query['$and'] = [{ 'context.end_date': { '$gt': duration[:start] } },
+                       { 'context.end_date': { '$lt': duration[:end] } }]
+    end
+
+    context = collection.find(query).first
+    next if context.nil?
+
+    unit = collection.find('registered_number': registered_number,
+                           'filing_date': filing_date,
+                           'unit.id': unit_ref).first
+    next if unit.nil?
+
+    warn "registered_number: #{registered_number}"
+
+    if entries.key?(registered_number)
+      warn "Duplicate entry: registered_number: '#{registered_number}', " \
+      "nonFraction.name: '#{result.dig('nonFraction', 'name')}', " \
+      "nonFraction.contextRef: '#{result.dig('nonFraction', 'contextRef')}', " \
+      "nonFraction.text: '#{result.dig('nonFraction', 'text')}'"
+      next
+    end
+
+    # instant = context.dig('context', 'instant')
+    # forever = context.dig('context', 'forever')
+
+    number = apply_scale_and_sign(result.dig('nonFraction', 'text'),
+                                  result.dig('nonFraction', 'scale'), result.dig('nonFraction', 'sign'))
+    if number && ignore_sign
+      number = -number if number < 0
+    end
+    unit = unit.dig('unit', 'measure')
+
+    start_date = context.dig('context', 'start_date')
+    end_date = context.dig('context', 'end_date')
+
+    entries[registered_number] = [number, unit, start_date, end_date]
+  end
+  entries
+end
+
+opt = OptionParser.new
+params = {}
+opt.on('-o [VAL]') { |v| params[:o] = v }
+opt.on('-p VAL') { |v| params[:p] = v }
+opt.on('-s [VAL]') { |v| params[:s] = v }
+opt.on('-e [VAL]') { |v| params[:e] = v }
+opt.parse!(ARGV)
+
+csvname = if params.key?(:o)
+            params[:o]
+          else
+            'accounts.csv'
+end
+
+duration_start = if params.key?(:s)
+                   params[:s]
+                 else
+                   '2017-12-31'
+end
+duration_end = if params.key?(:e)
+                 params[:s]
+               else
+                 '2019-01-01'
+end
+duration = { start: duration_start, end: duration_end }
+
+pattern = Regexp.compile(params[:p])
+
+# DividendsPaid, DividendsPaidOnShares
+# TurnoverRevenue
+names = ARGV[0..-1]
+
 client = Mongo::Client.new(['127.0.0.1:27017'],
                            database: 'uk_companies', monitoring: false)
-collection = client[:accounts]
+acct_collection = client[:accounts]
 
-csvname = ARGV.shift
-csvname = 'dividends.csv' if csvname.nil?
-
-output = open(csvname, 'w')
-output.puts %w[registered_number account_name number unit startDate endDate instant forever].to_csv
-
-dividends = {}
-
-results = collection.find('nonFraction.name': /Dividends/)
-warn "Number of Dividends: #{results.count}"
-results.each do |result|
-  account_name = if /^[^\:]+\:(.+)$/.match(result.dig('nonFraction', 'name'))
-                   $LAST_MATCH_INFO[1]
-                 else
-                   result.dig('nonFraction', 'name')
+open(csvname, 'w') do |output|
+  output.puts %w[registered_number query_acct_name query_duration_start query_duration_end number unit startDate endDate].to_csv
+  entries = retrieve_entries(acct_collection, pattern, names, duration, true)
+  entries.each do |registered_number, entry|
+    number = entry.shift
+    unit = entry.shift
+    start_date = entry.shift
+    end_date = entry.shift
+    output.puts [registered_number, params[:p], duration_start, duration_end, number, unit, start_date, end_date].to_csv
   end
-  if account_name != 'DividendsPaid' && account_name != 'DividendsPaidOnShares'
-    next
-  end
-
-  registered_number = result.dig('registered_number')
-
-  warn "registered_number: #{registered_number}"
-
-  filing_date = result.dig('filing_data')
-  context_ref = result.dig('nonFraction', 'contextRef')
-  unit_ref = result.dig('nonFraction', 'unitRef')
-  context = collection.find('registered_number': registered_number,
-                            'filing_data': filing_date,
-                            'context.id': context_ref).first
-  if context.nil?
-    warn "No context for '#{context_ref}': registered_number: '#{registered_number}', " \
-    "nonFraction.name: '#{result.dig('nonFraction', 'name')}', " \
-    "nonFraction.text: '#{result.dig('nonFraction', 'text')}'"
-    next
-  end
-
-  unit = collection.find('registered_number': registered_number,
-                         'filing_data': filing_date,
-                         'unit.id': unit_ref).first
-  if unit.nil?
-    warn "No unit for '#{unit_ref}': registered_number: '#{registered_number}', " \
-    "nonFraction.name: '#{result.dig('nonFraction', 'name')}', " \
-    "nonFraction.text: '#{result.dig('nonFraction', 'text')}'"
-    next
-  end
-
-  unless dividends.key?(registered_number)
-    dividends[registered_number] = { context: {} }
-  end
-
-  non_fraction_name = result.dig('nonFraction', 'name')
-  if dividends[registered_number][:context][context_ref] == non_fraction_name
-    warn "Duplicate entry: registered_number: '#{registered_number}', " \
-    "nonFraction.name: '#{result.dig('nonFraction', 'name')}', " \
-    "nonFraction.contextRef: '#{result.dig('nonFraction', 'contextRef')}', " \
-    "nonFraction.text: '#{result.dig('nonFraction', 'text')}'"
-    next
-  end
-  dividends[registered_number][:context][context_ref] = non_fraction_name
-
-  unless dividends[registered_number].key?(:entries)
-    dividends[registered_number][:entries] = {}
-  end
-
-  start_date = context.dig('context', 'start_date')
-  end_date = context.dig('context', 'start_date')
-  instant = context.dig('context', 'instant')
-  forever = context.dig('context', 'forever')
-
-  if start_date.nil? && end_date.nil? && instant.nil? && forever.nil?
-    warn "No startDate/EndDate/instant/forever': registered_number: '#{registered_number}', " \
-    "nonFraction.name: '#{result.dig('nonFraction', 'name')}', " \
-    "nonFraction.text: '#{result.dig('nonFraction', 'text')}'"
-    next
-  end
-
-  key = "#{start_date}/#{end_date}/#{instant}/#{forever}"
-  if dividends[registered_number][:entries].key?(key)
-    warn "Duplicate entry: registered_number: '#{registered_number}', " \
-    "nonFraction.start_date: '#{start_date}', " \
-    "nonFraction.end_date: '#{end_date}', " \
-    "nonFraction.instant: '#{instant}', " \
-    "nonFraction.forever: '#{forever}', " \
-    "nonFraction.text: '#{result.dig('nonFraction', 'text')}', " \
-    "Exisiting nonFraction.text: '#{dividends[registered_number][:entries][key]}'"
-    next
-  end
-
-  dividends[registered_number][:entries][key] = result.dig('nonFraction', 'text')
-
-  number = apply_scale_and_sign(result.dig('nonFraction', 'text'),
-                                result.dig('nonFraction', 'scale'), result.dig('nonFraction', 'sign'))
-
-  unit = unit.dig('unit', 'measure')
-
-  output.puts [registered_number, account_name, number, unit, start_date, end_date, instant, forever].to_csv
 end
