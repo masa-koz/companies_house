@@ -25,9 +25,36 @@ def apply_scale_and_sign(text, scale, sign)
   number
 end
 
+def retrieve_companies(collection)
+  companies = {}
+  query = {}
+  # query['CompanyNumber'] = 118_102
+
+  results = collection.find(query).projection('CompanyNumber' => 1, 'CountryOfOrigin' => 1, 'Accounts.AccountCategory' => 1)
+  warn "Number of companies: #{results.count}"
+  results.each_with_index do |result, i|
+    registered_number = if m = /^(\h{1,8})$/.match(result.dig('CompanyNumber').to_s)
+                          '0' * (8 - m[1].size) + (m[1]).to_s
+                        else
+                          '00000000'
+    end
+    warn "(#{i + 1}/#{results.count}): #{registered_number}" if (i % 1000) == 0
+
+    country_origin = result.dig('CountryOfOrigin')
+    account_category = result.dig('Accounts', 'AccountCategory')
+    h = { 'country_origin' => country_origin, 'account_category' => account_category }
+    companies[registered_number] = { country_origin: country_origin, account_category: account_category }
+  end
+  warn "#{results.count}/#{results.count}: #{companies.keys[-1]}"
+  companies
+end
+
 def retrieve_entries(collection, pattern, names, duration, ignore_sign)
   entries = {}
+
   query = { 'nonFraction.name': pattern }
+  # query['registered_number'] = '00118102'
+
   results = collection.find(query)
   warn "Number of Dividends: #{results.count}"
 
@@ -93,7 +120,8 @@ def retrieve_entries(collection, pattern, names, duration, ignore_sign)
     start_date = context.dig('context', 'start_date')
     end_date = context.dig('context', 'end_date')
 
-    entries[registered_number] = [number, unit, start_date, end_date]
+    entries[registered_number] = { number: number, unit: unit,
+                                   start_date: start_date, end_date: end_date }
   end
   entries
 end
@@ -133,15 +161,28 @@ names = ARGV[0..-1]
 client = Mongo::Client.new(['127.0.0.1:27017'],
                            database: 'uk_companies', monitoring: false)
 acct_collection = client[:accounts]
+basic_collection = client[:BasicCompanyData]
 
+companies = retrieve_companies(basic_collection)
+entries = retrieve_entries(acct_collection, pattern, names, duration, true)
+
+entries.each do |registered_number, entry|
+  if companies.key?(registered_number)
+    companies[registered_number].merge!(entry)
+  else
+    companies[registered_number] = entry
+  end
+end
+
+# companies[registered_number] = { country_origin: country_origin, account_category: account_category,
+#  account_ref_month: account_ref_month, account_ref_day: account_ref_day }
 open(csvname, 'w') do |output|
-  output.puts %w[registered_number query_acct_name query_duration_start query_duration_end number unit startDate endDate].to_csv
-  entries = retrieve_entries(acct_collection, pattern, names, duration, true)
-  entries.each do |registered_number, entry|
-    number = entry.shift
-    unit = entry.shift
-    start_date = entry.shift
-    end_date = entry.shift
-    output.puts [registered_number, params[:p], duration_start, duration_end, number, unit, start_date, end_date].to_csv
+  output.puts %w[registered_number country_origin account_category
+                 query_acct_name query_duration_start query_duration_end
+                 number unit startDate endDate].to_csv
+  companies.each do |registered_number, entry|
+    output.puts [registered_number, entry[:country_origin], entry[:account_category],
+                 params[:p], duration_start, duration_end,
+                 entry[:number], entry[:unit], entry[:start_date], entry[:end_date]].to_csv
   end
 end
