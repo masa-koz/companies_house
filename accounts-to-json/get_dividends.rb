@@ -28,12 +28,30 @@ client = Mongo::Client.new(['127.0.0.1:27017'],
                            database: 'uk_companies', monitoring: false)
 collection = client[:accounts]
 
-STDOUT.puts %w[registered_number account_name number unit startDate endDate instant forever].to_csv
+csvname = ARGV.shift
+csvname = 'dividends.csv' if csvname.nil?
+
+output = open(csvname, 'w')
+output.puts %w[registered_number account_name number unit startDate endDate instant forever].to_csv
 
 dividends = {}
 
-collection.find('nonFraction.name': /Dividends/).each do |result|
+results = collection.find('nonFraction.name': /Dividends/)
+warn "Number of Dividends: #{results.count}"
+results.each do |result|
+  account_name = if /^[^\:]+\:(.+)$/.match(result.dig('nonFraction', 'name'))
+                   $LAST_MATCH_INFO[1]
+                 else
+                   result.dig('nonFraction', 'name')
+  end
+  if account_name != 'DividendsPaid' && account_name != 'DividendsPaidOnShares'
+    next
+  end
+
   registered_number = result.dig('registered_number')
+
+  warn "registered_number: #{registered_number}"
+
   filing_date = result.dig('filing_data')
   context_ref = result.dig('nonFraction', 'contextRef')
   unit_ref = result.dig('nonFraction', 'unitRef')
@@ -71,12 +89,14 @@ collection.find('nonFraction.name': /Dividends/).each do |result|
   end
   dividends[registered_number][:context][context_ref] = non_fraction_name
 
+  unless dividends[registered_number].key?(:entries)
+    dividends[registered_number][:entries] = {}
+  end
+
   start_date = context.dig('context', 'start_date')
   end_date = context.dig('context', 'start_date')
   instant = context.dig('context', 'instant')
   forever = context.dig('context', 'forever')
-
-  unit = unit.dig('unit', 'measure')
 
   if start_date.nil? && end_date.nil? && instant.nil? && forever.nil?
     warn "No startDate/EndDate/instant/forever': registered_number: '#{registered_number}', " \
@@ -85,12 +105,24 @@ collection.find('nonFraction.name': /Dividends/).each do |result|
     next
   end
 
+  key = "#{start_date}/#{end_date}/#{instant}/#{forever}"
+  if dividends[registered_number][:entries].key?(key)
+    warn "Duplicate entry: registered_number: '#{registered_number}', " \
+    "nonFraction.start_date: '#{start_date}', " \
+    "nonFraction.end_date: '#{end_date}', " \
+    "nonFraction.instant: '#{instant}', " \
+    "nonFraction.forever: '#{forever}', " \
+    "nonFraction.text: '#{result.dig('nonFraction', 'text')}', " \
+    "Exisiting nonFraction.text: '#{dividends[registered_number][:entries][key]}'"
+    next
+  end
+
+  dividends[registered_number][:entries][key] = result.dig('nonFraction', 'text')
+
   number = apply_scale_and_sign(result.dig('nonFraction', 'text'),
                                 result.dig('nonFraction', 'scale'), result.dig('nonFraction', 'sign'))
-  account_name = if /^[^\:]+\:(.+)$/.match(result.dig('nonFraction', 'name'))
-                   $LAST_MATCH_INFO[1]
-                 else
-                   result.dig('nonFraction', 'name')
-  end
-  STDOUT.puts [registered_number, account_name, number, unit, start_date, end_date, instant, forever].to_csv
+
+  unit = unit.dig('unit', 'measure')
+
+  output.puts [registered_number, account_name, number, unit, start_date, end_date, instant, forever].to_csv
 end
