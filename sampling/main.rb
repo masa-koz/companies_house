@@ -55,13 +55,13 @@ mean = registered_numbers.values.mean
 csv = [count, mean].flatten(1).to_csv
 csv_output.puts csv
 csv_output.flush
-warn csv
 count += 1
 
 count.step(100_000) do
   warn "#{count}:"
-  output = if jsonname && params[:r].nil?
-             open("#{jsonname}_#{count}", 'w')
+  output = if jsonname
+             prefix = "#{count}_" unless params[:r].nil?
+             open("#{prefix}#{jsonname}", 'w')
            else
              STDOUT
            end
@@ -75,8 +75,7 @@ count.step(100_000) do
   csv = [count, mean].flatten(1).to_csv
   csv_output.puts csv
   csv_output.flush
-  warn csv
-
+  
   warn "Number of sample companies: #{sample.size}"
 
   output.puts sample.to_json
