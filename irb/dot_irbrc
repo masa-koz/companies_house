@@ -1,0 +1,49 @@
+# frozen_string_literal: true
+
+require 'enumerable/statistics'
+require 'json'
+require 'mongo'
+
+IRB.conf[:SAVE_HISTORY] = 10000
+IRB.conf[:HISTORY_FILE] = '~/.irb-history'
+
+def get_id(jname)
+  JSON.load(open(jname).read)
+end
+
+def get_client(db)
+  Mongo::Client.new(['127.0.0.1:27017'], database: db, monitoring: false)
+end
+
+def find_by_id(collection, registered_numbers = nil, field = :registered_number)
+  results = []
+  if registered_numbers
+    registered_numbers.each do |registered_number|
+      query = { field => registered_number }
+      results.push(collection.find(query).collect { |v| v })
+    end
+    results.flatten(1)
+  else
+    collection.find.collect {|v| v}
+  end
+end
+
+def cast_id_as_int(ids)
+  ids.collect{|v|
+    if v =~ /^0*([1-9]+\d*)$/
+      Integer($~[1])
+    else
+      v
+    end
+  }.compact 
+end
+
+def cast_id_as_str(ids)
+  ids.collect{|v|
+    if "#{v}".size < 8
+      "0" * (8 - "#{v}".size) + "#{v}"
+    else
+      "#{v}"
+    end
+  } 
+end
