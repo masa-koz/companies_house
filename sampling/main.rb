@@ -75,7 +75,7 @@ count.step(100_000) do
   csv = [count, mean].flatten(1).to_csv
   csv_output.puts csv
   csv_output.flush
-  
+
   warn "Number of sample companies: #{sample.size}"
 
   output.puts sample.to_json
@@ -88,6 +88,6 @@ csv_output.close
 
 if all_jsonname
   all_output = open(all_jsonname, 'w')
-  all_output&.puts registered_numbers.to_json
+  all_output&.puts registered_numbers.keys.to_json
   all_output.close
 end
