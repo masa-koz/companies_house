@@ -7,11 +7,11 @@ require 'mongo'
 IRB.conf[:SAVE_HISTORY] = 10000
 IRB.conf[:HISTORY_FILE] = '~/.irb-history'
 
-def get_id(jname)
+def load_id(jname)
   JSON.load(open(jname).read)
 end
 
-def get_client(db)
+def connect_db(db = 'uk_companies')
   Mongo::Client.new(['127.0.0.1:27017'], database: db, monitoring: false)
 end
 
@@ -26,6 +26,25 @@ def find_by_id(collection, registered_numbers = nil, field = :registered_number)
   else
     collection.find.collect {|v| v}
   end
+end
+
+def find_by_id2(collection, registered_numbers = nil, field = :registered_number)
+  h = Hash[collection.find.collect {|v| [v.dig(field), v]}]
+  h.slice(*(h.keys & registered_numbers)).values
+end
+
+def get_id(collection, query = {}, limit = nil, field = :registered_number)
+  results = unless limit.nil?
+    collection.find(query).limit(limit).projection({field => 1}).collect {|v| v.dig(field) }
+  else
+    collection.find(query).projection({field => 1}).collect {|v| v.dig(field) }
+  end
+  results.uniq
+end
+
+def make_duration_query(target = 'context.end_date', after = '2017-12-31', before = '2019-01-01')
+  {'$and' => [{ target => { '$gt': after } },
+              { target => { '$lt': before } }]}
 end
 
 def cast_id_as_int(ids)
