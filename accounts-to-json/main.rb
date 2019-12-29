@@ -18,7 +18,7 @@ class UKAccountsDocument
     @worker_id = worker_id
     @debug = debug
 
-    if m = /\_(\d{8})\_(\d{8})\.html$/.match(filename)
+    if m = /\_(\d{8})\_(\d{8})\..+$/.match(filename)
       @registered_number = m[1]
       @filing_date = m[2]
     end
@@ -191,6 +191,20 @@ class UKAccountsDocument
     # ix:numerator
   end
 
+  def convert_element_with_unit
+    REXML::XPath.each(@doc, '//*[@unitRef]') do |element|
+      non_fraction_hash = {}
+
+      non_fraction_hash[:name] = element.local_name
+      non_fraction_hash[:contextRef] = element.attributes['contextRef']
+      non_fraction_hash[:unitRef] = element.attributes['unitRef']
+      non_fraction_hash[:text] = element.text
+      json = { registered_number: @registered_number, filing_date: @filing_date, nonFraction: non_fraction_hash }
+      @output.puts json.to_json
+      @output.flush
+    end
+  end
+
   def parse
     begin
       case @filename
@@ -224,8 +238,9 @@ class UKAccountsDocument
   def parse_xml
     # open(@filename, 'w') { |out| @doc.write(output: out, indent: 2) }
     load_namespace
-    load_contexts
-    load_units
+    convert_units
+    convert_contexts
+    convert_element_with_unit
 
     @parsed = true
   end
