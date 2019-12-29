@@ -11,6 +11,14 @@ def load_id(jname)
   JSON.load(open(jname).read)
 end
 
+def save_id(id, jname)
+  open(jname, 'w'){|f| f.puts id.to_json}
+end
+
+def load_results(jname)
+  open(jname) {|f| f.readlines.collect {|v| JSON.parse(v)} }
+end
+
 def connect_db(db = 'uk_companies')
   Mongo::Client.new(['127.0.0.1:27017'], database: db, monitoring: false)
 end
@@ -50,7 +58,7 @@ def make_duration_query(target = 'context.end_date', after = '2017-12-31', befor
               { target => { '$lt': before } }]}
 end
 
-def make_category_query(category)
+def make_category_query(category = "FULL")
   {'Accounts.AccountCategory' => category}
 end
 
