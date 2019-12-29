@@ -28,9 +28,12 @@ def find_by_id(collection, registered_numbers = nil, field = :registered_number)
   end
 end
 
-def find_by_id2(collection, registered_numbers = nil, field = :registered_number)
-  h = Hash[collection.find.collect {|v| [v.dig(field), v]}]
-  h.slice(*(h.keys & registered_numbers)).values
+def find_via_query(collection, query = {}, limit = nil)
+  unless limit.nil?
+    collection.find(query).limit(limit).collect {|v| v}
+  else
+    collection.find(query).collect {|v| v}
+  end
 end
 
 def get_id(collection, query = {}, limit = nil, field = :registered_number)
@@ -45,6 +48,10 @@ end
 def make_duration_query(target = 'context.end_date', after = '2017-12-31', before = '2019-01-01')
   {'$and' => [{ target => { '$gt': after } },
               { target => { '$lt': before } }]}
+end
+
+def make_category_query(category)
+  {'Accounts.AccountCategory' => category}
 end
 
 def cast_id_as_int(ids)
