@@ -66,7 +66,7 @@ count.step(100_000) do
              STDOUT
            end
 
-  sample = registered_numbers.keys.sample(registered_numbers.size / 50)
+  sample = registered_numbers.keys.sample(registered_numbers.size / 10)
 
   # sample_subsidiaries = registered_numbers.slice(*(sample & subsidiaries.keys))
   sample_registered_numbers = registered_numbers.slice(*sample)
