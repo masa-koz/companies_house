@@ -1,18 +1,33 @@
 # frozen_string_literal: true
 
+require 'csv'
 require 'enumerable/statistics'
 require 'json'
 require 'mongo'
+require 'net/http'
+require 'uri'
 
 IRB.conf[:SAVE_HISTORY] = 10000
 IRB.conf[:HISTORY_FILE] = '~/.irb-history'
 
 def load_id(jname)
-  JSON.load(open(jname).read)
+  cast_id_as_int(JSON.load(open(jname).read))
 end
 
 def save_id(id, jname)
   open(jname, 'w'){|f| f.puts id.to_json}
+end
+
+def save_id_as_csv(registered_numbers, csvname)
+  csv = CSV.generate('', headers: true) { |csv|
+    csv.add_row(['registered_number', 'YR', 'turnover', 'dividends', 'fixed_assets', 'cash', 'retained_profits'])
+    0.step(10) do
+      cast_id_as_str(registered_numbers).each do |registered_number|
+        csv.add_row([registered_number, nil, nil, nil, nil, nil, nil])
+      end
+    end
+  }
+  open(csvname, 'w'){|f| f.puts csv}
 end
 
 def load_results(jname)
@@ -50,7 +65,7 @@ def get_id(collection, query = {}, limit = nil, field = :registered_number)
   else
     collection.find(query).projection({field => 1}).collect {|v| v.dig(field) }
   end
-  results.uniq
+  cast_id_as_int(results.uniq)
 end
 
 def make_duration_query(target = 'context.end_date', after = '2017-12-31', before = '2019-01-01')
@@ -80,4 +95,88 @@ def cast_id_as_str(ids)
       "#{v}"
     end
   } 
+end
+
+def load_apikey(jname = "#{Dir.home}/.CompaniesHouse.apikey")
+  open(jname) {|f| JSON.parse(f.read) }
+end
+
+def get_filing_history(registered_number, apikey, category = 'accounts')
+  registered_number = cast_id_as_str([registered_number]).shift
+  u = URI::HTTPS.build({host: 'api.companieshouse.gov.uk',
+    path: "/company/#{registered_number}/filing-history",
+    query: "category=#{category}"})
+
+  http = Net::HTTP.new(u.host, u.port)
+  # http.set_debug_output(STDERR)
+  http.use_ssl = true
+  hash = JSON.parse(http.start { |h|
+    req = Net::HTTP::Get.new(u.request_uri)
+    req.basic_auth(apikey, '')
+    response = http.request(req)
+    response.body
+  })
+  items = hash.dig('items')
+  return if items.nil?
+  Hash[items.collect { |v|
+    [v.dig('description_values', 'made_up_date'),
+    v.dig('links', 'document_metadata')]
+  }]
+end
+
+def save_document(uri, apikey, pdfname)
+  u = URI.parse(uri)
+  http = Net::HTTP.new(u.host, u.port)
+  # http.set_debug_output(STDERR)
+  http.use_ssl = true
+  hash = JSON.parse(http.start { |h|
+    req = Net::HTTP::Get.new(u.request_uri)
+    req.basic_auth(apikey, '')
+    response = h.request(req)
+    response.body
+  })
+  document_uri = hash.dig('links', 'document')
+  return if document_uri.nil?
+
+  u1 = URI.parse(document_uri)
+
+  http = Net::HTTP.new(u1.host, u1.port)
+  # http.set_debug_output(STDERR)
+  http.use_ssl = true
+  response = http.start { |h|
+    req = Net::HTTP::Get.new(u1.request_uri, {Accept: 'application/pdf'})
+    req.basic_auth(apikey, '')
+    h.request(req)
+  }
+  
+  case response
+  when Net::HTTPMovedPermanently, Net::HTTPFound, Net::HTTPSeeOther,
+        Net::HTTPTemporaryRedirect then
+    0.step(10) do
+      location_u = URI.parse(response["Location"])
+
+      http = Net::HTTP.new(location_u.host, location_u.port)
+      # http.set_debug_output(STDERR)
+      http.use_ssl = true
+
+      response = http.start { |h|
+        req = Net::HTTP::Get.new(location_u.request_uri)
+        h.request(req)
+      }
+      case response
+      when Net::HTTPMovedPermanently, Net::HTTPFound, Net::HTTPSeeOther,
+          Net::HTTPTemporaryRedirect then
+        next
+      else
+        break
+      end
+    end
+  end
+
+  if response.instance_of?(Net::HTTPOK)
+    open(pdfname, 'w') {|f| f.write(response.body) }
+    response.body.size
+  else
+    0
+  end
 end
